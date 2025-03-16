@@ -1,0 +1,197 @@
+---
+# Ansible Playbook to Upgrade Cisco IOS Based on Model & Version
+
+- name: Upgrade CISCO IOS Dynamically
+  hosts: all
+  gather_facts: false
+  connection: network_cli
+
+  vars:
+    firmware_mapping:
+      WS-C2960X-24TS-L: "c2960x-universalk9-mz.152-7.E11.bin"
+      WS-C2960X-48TS-L: "c2960x-universalk9-mz.152-7.E11.bin"
+      WS-C2960S-48TS-L: "c2960s-universalk9-mz.152-2.E9.bin"
+      WS-C2960S-24TS-L: "c2960s-universalk9-mz.152-2.E9.bin"
+      WS-C2960-48TC-L: "c2960-lanbasek9-mz.122-55.SE12.bin"
+      WS-C2960-24TC-L: "c2960-lanbasek9-mz.122-55.SE12.bin"
+      WS-C3750X-24: "c3750e-universalk9-mz.152-4.E10.bin"
+    firmware_size:
+      WS-C2960X-24TS-L: 27000000  # Size in bytes (e.g., 200MB)
+      WS-C2960S-48TS-L: 17000000
+      WS-C2960X-48TS-L: 27000000  # Size in bytes (e.g., 200MB)
+      WS-C2960S-24TS-L: 17000000
+      WS-C2960-48TC-L: 27000000
+      WS-C2960-24TC-L: 27000000
+      WS-C3750X-24: 25000000
+    firmware_md5:
+      WS-C2960X-24TS-L: "2351a8bf98b9dfb721cc7c36a905f93b"
+      WS-C2960X-48TS-L: "2351a8bf98b9dfb721cc7c36a905f93b"
+      WS-C2960S-48TS-L: "ea604d030b378b6c5c3dda3d501ac2f5"
+      WS-C2960S-24TS-L: "ea604d030b378b6c5c3dda3d501ac2f5"
+      WS-C2960-48TC-L: "1504e5d9342eabf6f7b2376e94ace46f"
+      WS-C2960-24TC-L: "1504e5d9342eabf6f7b2376e94ace46f"
+      WS-C3750X-24: "6f3b3ddec62c77747c214cc7be555ec4"
+
+    tftp_server: "10.14.51.46"
+    log_file: "/var/log/ansible_ios_upgrade.log"
+
+  vars_files:
+    - vault.yml
+
+  tasks:
+    - name: Gather Cisco Facts
+      ios_facts:
+        gather_network_resources: all
+      register: facts_result
+      retries: 3
+      delay: 10
+      until: facts_result is success
+
+    - name: Determine Suitable Firmware
+      set_fact:
+        upgrade_ios_version: "{{ firmware_mapping[ansible_net_model] | default('') }}"
+        expected_md5: "{{ firmware_md5[ansible_net_model] | default('') }}"
+        required_space: "{{ firmware_size[ansible_net_model] | default(0) }}"
+
+    - name: Validate Firmware Selection
+      fail:
+        msg: "No firmware found for model {{ ansible_net_model }}"
+      when: upgrade_ios_version == ""
+
+    - name: Determine if Upgrade is Needed
+      set_fact:
+        upgrade_needed: "{{ ansible_net_version not in upgrade_ios_version }}"
+  #  - name: Debug Information
+    #  debug:
+     #   msg:
+      #    - "Device Model: {{ ansible_net_model }}"
+       #   - "Current IOS Version: {{ ansible_net_version }}"
+        #  - "Target Firmware: {{ upgrade_ios_version }}"
+         # - "Hostname: {{ ansible_net_hostname }}"
+         # - "Expected MD5: {{ expected_md5 }}"
+         # - "Required Flash Space: {{ required_space | human_readable }}"
+
+    - name: Check Available Flash Space
+      ios_command:
+        commands: "dir flash:"
+      register: flash_output
+
+    - name: Extract Available Flash Space
+      set_fact:
+        available_space: "{{ flash_output.stdout[0] | regex_search('(\\d+) bytes free', '\\1') | first | int }}"
+
+    - name: Compare Flash Space with Required Size
+      fail:
+        msg: "Insufficient flash space! Required: {{ required_space | human_readable }}, Available: {{ available_space | human_readable }}. Skipping upgrade."
+      when: available_space < required_space
+
+    - name: Log Insufficient Space Issue
+      ansible.builtin.lineinfile:
+        path: "{{ log_file }}"
+        line: "{{ ansible_net_hostname }} - Insufficient flash space! Required: {{ required_space | human_readable }}, Available: {{ available_space | human_readable }}."
+        create: yes
+      when: available_space < required_space
+
+    - name: Skip Upgrade If Flash Space Is Insufficient
+      meta: end_play
+      when: available_space < required_space
+
+    #Added section for skip upgrade if file exist in flash
+
+    - name: Check if Frimware File Already Exists in Flash
+      ios_command:
+        commands: "dir flash:{{ upgrade_ios_version }}"
+      register: frimware_check
+      ignore_errors: yes
+
+    - name: Set Fact for Frimware File Existence
+      set_fact:
+        firmware_exists: "{{ frimware_check.stdout[0] is search(upgrade_ios_version) }}"
+      when: frimware_check.stdout is defined
+
+    - name: Log If Frimware Already Exsists
+      ansible.builtin.lineinfile:
+        path: "{{ log_file }}"
+        line: "{{ ansible_net_hostname }} - Frimware {{ upgrade_ios_version }} already exists in flash."
+        create: yes
+      when: firmware_exists | default(false)
+
+    #End of section for skip upgrade if file exist in flash
+
+    - name: Skip Upgrade If Frimware Exists
+      meta: end_play
+      when: firmware_exists | default(false)
+
+    - name: Upgrade Cisco IOS
+      block:
+        - name: Copy firmware using TFTP
+          ansible.netcommon.cli_command:
+            command: "copy tftp://{{ tftp_server }}/{{ upgrade_ios_version }} flash:"
+            prompt:
+              - "Destination filename"
+              - "Proceed with copy?"
+            answer:
+              - "{{ upgrade_ios_version }}"
+              - "y"
+          vars:
+            ansible_command_timeout: 1000
+          when: not firmware_exists | default(false)
+
+        - name: Verify File MD5 Checksum
+          ios_command:
+            commands: "verify /md5 flash:{{ upgrade_ios_version }}"
+          register: verify_result
+          vars:
+            ansible_command_timeout: 300
+
+        - name: Extract MD5 Checksum from Output
+          set_fact:
+            actual_md5: "{{ verify_result.stdout[0] | regex_search('[a-fA-F0-9]{32}') }}"
+
+        - name: Compare MD5 Checksum
+          fail:
+            msg: "MD5 checksum mismatch! Expected: {{ expected_md5 }}, Got: {{ actual_md5 }}. Skipping upgrade."
+          when: actual_md5 != expected_md5
+
+        - name: Log Failure if MD5 Doesn't Match
+          ansible.builtin.lineinfile:
+            path: "{{ log_file }}"
+            line: "{{ ansible_net_hostname }} - MD5 mismatch! Expected: {{ expected_md5 }}, Got: {{ actual_md5 }}."
+            create: yes
+          when: actual_md5 != expected_md5
+
+        - name: Configure Boot Variable
+          ios_config:
+            commands:
+              - "no boot system"
+              - "boot system flash:{{ upgrade_ios_version }}"
+            save_when: always
+
+        - name: Reload the Device
+          ansible.netcommon.cli_command:
+            command: reload
+            prompt:
+              - "[confirm]"
+            answer:
+              - 'y'
+          register: reload_result
+
+        - name: Wait for Device to Reboot
+          wait_for_connection:
+            delay: 1000
+            timeout: 20000
+          delegate_to: localhost
+
+    - name: Verify Upgrade
+      ios_facts:
+        gather_network_resources: all
+      register: final_facts
+      when: upgrade_needed
+
+    - name: Confirm Upgrade
+      assert:
+        that:
+          - "final_facts.ansible_facts.ansible_net_version == upgrade_ios_version.split('.bin')[0]"
+        success_msg: "Upgrade successful to {{ upgrade_ios_version }}"
+        fail_msg: "Upgrade failed - current version {{ final_facts.ansible_facts.ansible_net_version }}"
+      when: upgrade_needed

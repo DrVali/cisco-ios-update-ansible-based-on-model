@@ -1,0 +1,17 @@
+all:
+  children:
+    switches12:
+        hosts:
+          switch-test1:
+            ansible_host: 172.25.36.100
+          switch-test2:
+            ansible_host: 172.25.36.101
+
+        vars:
+          ansible_network_os: cisco.ios.ios
+          ansible_connection: network_cli
+          ansible_become: yes
+          ansible_become_method: enable
+          ansible_user: "{{ credentials[inventory_hostname]['user'] }}"
+          ansible_password: "{{ credentials[inventory_hostname]['pass'] }}"
+          ansible_become_password: "{{ credentials[inventory_hostname]['enable'] }}"
