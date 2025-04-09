@@ -61,16 +61,7 @@
     - name: Determine if Upgrade is Needed
       set_fact:
         upgrade_needed: "{{ ansible_net_version not in upgrade_ios_version }}"
-  #  - name: Debug Information
-    #  debug:
-     #   msg:
-      #    - "Device Model: {{ ansible_net_model }}"
-       #   - "Current IOS Version: {{ ansible_net_version }}"
-        #  - "Target Firmware: {{ upgrade_ios_version }}"
-         # - "Hostname: {{ ansible_net_hostname }}"
-         # - "Expected MD5: {{ expected_md5 }}"
-         # - "Required Flash Space: {{ required_space | human_readable }}"
-
+  
     - name: Check Available Flash Space
       ios_command:
         commands: "dir flash:"
